@@ -5,6 +5,11 @@ from sklearn import svm
 from sklearn.metrics import accuracy_score
 from sklearn.multiclass import OneVsRestClassifier
 
+# for multithreading
+from multiprocessing import Pool
+from functools import partial
+from sklearn import model_selection
+
 """
 Loosely inspired by http://abel.ee.ucla.edu/cvxopt/_downloads/mnist.py
 which is GPL licensed.
@@ -81,25 +86,71 @@ def getBinaryClassifierWeights(X_train, Y_train, c=0.1):
     #print("returning classifier weights")
     return clf.coef_
 
+def trainBinary(X_train, Y_train, c, clas):
+    bin_Y_train = np.ma.masked_equal(Y_train, clas).recordmask
+    return getBinaryClassifierWeights(X_train, bin_Y_train, c)
+    
 if __name__ == "__main__":
+
+    # get data
     (X_train, Y_train, X_test, Y_test) =  getData()
-    ## Here using one-vs-all algorithm predict the labels for X_test
-    ## You just need to implement the logic of one-vs-all. For each binary classifiers use "getBinaryClassifierWeights" method.
-    ## Cross validate on the training set to find out the value of c (parameter for binary classifiers) that generates the best score and then with this c, test on X-test and recoed the accuracy
-    ## accuacy can be calculated by "accuracy_score(Y_test, predict_Y)"
+    # get unique classes
+    classes = np.unique(Y_train)
 
+    # create multiprocess pool for training clasess in parallel
+    # greatly speeds up training
+    pool = Pool(8)
 
+    # maps c values to resulting model accuracy
+    c_acc = {}
 
+    # build cross validation indices
+    kf = model_selection.KFold(n_splits=3, shuffle=False)
 
+    # top loop over hyperparameter C
+    for c in [ pow(10, x) for x in range(-8, 2) ]:
 
+        print("c", c)
 
+        # list of accuracies
+        acc = []
 
+        for train_index, test_index in kf.split(X_train):
 
+            # get the test/train sets
+            X_train_kf, X_test_kf = X_train[train_index], X_train[test_index]
+            Y_train_kf, Y_test_kf = Y_train[train_index], Y_train[test_index]
 
+            # curried function to pass to pool.map
+            map_func = partial(trainBinary, X_train_kf, Y_train_kf, c)
 
+            # getBinaryClassifier weights
+            # some hackery required to properly format the output 
+            weights = np.array(pool.map(map_func, classes)) \
+                .reshape(len(classes), X_train_kf.shape[1]).T
 
+            # predict using weights vector
+            prediction = np.argmax(np.dot(X_test_kf, weights), axis=1)
+            acc.append( accuracy_score(Y_test_kf, prediction) )
 
+        # update the c_acc dictionary
+        c_acc[c] = sum(acc)/len(acc)
 
+    print(c_acc)
 
+    # get the c with highest accuracy
+    best_c = max(c_acc, key=c_acc.get) 
 
+    print("best c", best_c)
 
+    # build models on all training data with best c
+    map_func = partial(trainBinary, X_train, Y_train, best_c)
+    weights = np.array(pool.map(map_func, classes)) \
+        .reshape(len(classes), X_train.shape[1]).T
+
+    # predict on test set
+    prediction = np.argmax(np.dot(X_test, weights), axis=1)
+    print("test accuracy", accuracy_score(Y_test, prediction) )
+
+    # 10-fold cross validation from 10^-8 to 10^2 yielded c=10^-6 and accuracy 91.68%
+    # took about an hour to run

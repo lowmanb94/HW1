@@ -4,6 +4,9 @@ import math
 import numpy as np
 from scipy.sparse import rand
 
+from multiprocessing import Pool
+from functools import partial
+from sklearn import model_selection
 
 def read(dataset="training", path="."):
     """
@@ -73,6 +76,7 @@ def trainSVM(xTrain, yTrain, C=1, numEpoch=100):
     # numEpoch: number of iteration
     learning_rate = 0.01
     feature_size = xTrain.shape[1]
+    n_samples = xTrain.shape[0]
     y_labels = np.unique(yTrain)
     weight = np.zeros((len(y_labels), feature_size))
     for epoch in range(numEpoch):
@@ -90,12 +94,16 @@ def trainSVM(xTrain, yTrain, C=1, numEpoch=100):
             # loss can be used for debugging
             if predicted_y != yTrain[i]:
                 loss += 1
-            # update weight
-			#  =========================================
-            # You need to implement the update rules here
-			#  =========================================
 
-       print('%d\t%f\t%f' % (epoch, ((loss / len(xTrain)) * 100), computeObjectiveValue(weight, C, xTrain, yTrain)))
+            ### implememntation of update rules
+            for k in y_labels:
+                weight[k] -= learning_rate * weight[k] / n_samples
+
+            if predicted_y != yTrain[i]:
+                weight[yTrain[i]]   += learning_rate * C * xTrain[i] 
+                weight[predicted_y] -= learning_rate * C * xTrain[i]
+
+        print('%d\t%f\t%f' % (epoch, ((loss / len(xTrain)) * 100), computeObjectiveValue(weight, C, xTrain, yTrain)))
 
     return weight
 
@@ -115,7 +123,10 @@ def testSVM(xTest, yTest, weight, y_labels):
         if predicted_y == yTest[i]:
             accurate += 1
 
-    print('Accuracy: ', (accurate / len(xTest)) * 100)
+    # print('Accuracy: ', (accurate / len(xTest)) * 100)
+    return (accurate / len(xTest)) * 100
+
+
 def toLiblinear(data, label, fileName):
     fp = open(fileName,'w')
     feature_size = data.shape[1]
@@ -127,17 +138,47 @@ def toLiblinear(data, label, fileName):
         fp.write('\n')
     fp.close()
 
+
+# trains SVM for given C parameter
+def trainWithC(xTrain, yTrain, epochs, c):
+
+    # initialize cross validation
+    kf = model_selection.KFold(n_splits=10, shuffle=False)
+    # initialize list of model accuracies
+    acc = []
+
+    # loop over folds
+    for train_index, test_index in kf.split(xTrain):
+
+        xTrain_kf, xTest_kf = xTrain[train_index], xTrain[test_index]
+        yTrain_kf, yTest_kf = yTrain[train_index], yTrain[test_index]
+
+        weight = trainSVM(xTrain_kf, yTrain_kf, c, epochs)
+        acc.append( testSVM(xTest_kf, yTest_kf, weight, np.unique(yTrain)) )
+
+    # return tuple of c and accuracy
+    return (c, sum(acc)/len(acc))
+
+
 if __name__ == '__main__':
+
     xTrain, yTrain = getData("training")
     xTest, yTest = getData("testing")
-    #toLiblinear(xTrain,yTrain,'train.data')
-    #toLiblinear(xTest,yTest,'test.data')
-    #  =============================================================
-    # You need to change the code here to implmement cross-validation
-    #  =============================================================
-    weight = trainSVM(xTrain, yTrain, 1, 100)
-    testSVM(xTest, yTest, weight, np.unique(yTrain))
 
+    # create process pool
+    pool = Pool(8)
 
+    # define c values to test
+    c_space = [ pow(10, x) for x in range(-4, 3) ]
 
+    # test all candidate C parameters in parallel
+    map_func = partial(trainWithC, xTrain, yTrain, 100)
+    c_acc = dict(pool.map(map_func, c_space))
 
+    # train and test model using best c
+    best_c = max(c_acc, key=c_acc.get)
+    weight = trainSVM(xTrain, yTrain, best_c, 100)
+
+    print(c_acc)
+    print("best c", best_c)
+    print("accuracy", testSVM(xTest, yTest, weight, np.unique(yTrain)))
